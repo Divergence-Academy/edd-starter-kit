@@ -3,106 +3,129 @@ evals/pricing_accuracy.py — Code-Based Eval: Pricing Accuracy
 
 🔧 YOU COMPLETE THIS FILE (Session 5)
 
-This eval checks whether the agent quoted correct product prices
-by comparing the price in the agent's response against the actual
-price in the AdventureWorks database.
+Uses Phoenix SpanQuery to pull tool:lookup_product spans, then compares
+the price in the tool result against SQLite ground truth.
 
 How it works:
-  1. Pull traces from Phoenix (only tool:lookup_product spans)
-  2. For each span, extract the product name and the price the agent used
-  3. Look up the real price in SQLite
-  4. Compare: if they match (within $0.01), PASS. Otherwise, FAIL.
-  5. Push annotations back to Phoenix
+  1. SpanQuery pulls all tool:lookup_product spans from Phoenix
+  2. For each span, extract the product name and tool result price
+  3. Look up the real price in SQLite (ground truth)
+  4. Compare: match within $0.01 → PASS, otherwise FAIL
+  5. Push SpanEvaluations back to Phoenix
 
 Run:
   python pricing_accuracy.py
 """
 
-import re
 import json
+import pandas as pd
 from eval_helpers import (
     get_phoenix_client,
-    get_traces,
+    query_tool_spans,
+    push_eval_results,
     lookup_product_price,
-    push_annotations,
 )
-
-
-def extract_price_from_text(text: str) -> float | None:
-    """
-    Extract a dollar amount from text like "$2,294.99" or "2294.99 dollars".
-    Returns the numeric value or None if no price found.
-    """
-    # Look for patterns like $1,234.56 or $1234.56
-    matches = re.findall(r"\$?([\d,]+\.?\d*)", text)
-    for match in matches:
-        try:
-            value = float(match.replace(",", ""))
-            if value > 0:
-                return value
-        except ValueError:
-            continue
-    return None
 
 
 def run_pricing_eval():
     """
-    Main eval function. Pull traces, check prices, push results.
+    Main eval function. Pull tool spans, check prices, push results.
     """
     client = get_phoenix_client()
-    df = get_traces(client)
 
-    if df is None:
+    # ────────────────────────────────────────────────────────────
+    # Step 1: Query tool spans from Phoenix using SpanQuery
+    #
+    # This uses the Phoenix SpanQuery DSL to pull only the spans
+    # we care about — tool:lookup_product calls.
+    # ────────────────────────────────────────────────────────────
+    df = query_tool_spans(client, tool_name="lookup_product")
+
+    if df.empty:
         return
 
-    annotations = []
-
     # ────────────────────────────────────────────────────────────
-    # TODO: Implement the pricing accuracy eval
+    # TODO: Step 2 — Evaluate each span
     #
-    # Steps:
-    #   1. Filter the DataFrame to only include tool spans where
-    #      the tool name is "lookup_product":
+    # For each row in the DataFrame:
+    #   a. Parse tool_parameters (JSON string) to get the product name
+    #   b. Parse tool_result (JSON string) to get the returned ListPrice
+    #   c. Look up ground truth price: lookup_product_price(product_name)
+    #   d. Compare: abs(tool_price - actual_price) < 0.01
+    #   e. Record label ("PASS" or "FAIL"), score (1 or 0), explanation
     #
-    #      tool_spans = df[df["name"] == "tool:lookup_product"]
-    #
-    #   2. For each tool span:
-    #      a. Extract the product name from the tool parameters
-    #         (stored in attributes as "tool.parameters")
-    #
-    #      b. Extract the price from the tool result
-    #         (stored in attributes as "output.value")
-    #
-    #      c. Look up the ground truth price from SQLite:
-    #         actual_price = lookup_product_price(product_name)
-    #
-    #      d. Compare the two prices:
-    #         - If they match within $0.01 → PASS
-    #         - If they don't match → FAIL
-    #         - If you can't extract either price → FAIL with explanation
-    #
-    #      e. Append to annotations:
-    #         annotations.append({
-    #             "span_id": span_id,
-    #             "label": "PASS" or "FAIL",
-    #             "score": 1 or 0,
-    #             "explanation": "why"
-    #         })
-    #
-    #   3. Push annotations to Phoenix:
-    #      push_annotations(client, annotations, "pricing_accuracy")
+    # Build a results DataFrame with the same index as df (span IDs)
+    # and columns: label, score, explanation
     #
     # Hints:
-    #   - span_id is the index of the DataFrame (df.index)
-    #   - Tool parameters are JSON strings: json.loads(row["attributes"]["tool.parameters"])
-    #   - Tool results are JSON strings: json.loads(row["attributes"]["output.value"])
+    #   - tool_parameters is a JSON string: json.loads(row["tool_parameters"])
+    #   - tool_result is a JSON string: json.loads(row["tool_result"])
     #   - The product result dict has a "ListPrice" field
+    #   - Handle errors gracefully (missing data, parse failures)
+    #
+    # Example:
+    #   params = json.loads(row["tool_parameters"])
+    #   product_name = params.get("name", "")
+    #   result = json.loads(row["tool_result"])
+    #   tool_price = result.get("ListPrice")
+    #   actual_price = lookup_product_price(product_name)
     #
     # ────────────────────────────────────────────────────────────
 
-    # REMOVE THIS PLACEHOLDER once you implement the above:
-    print("⚠️  pricing_accuracy.py is not yet implemented.")
-    print("   Complete the TODO in this file to run the eval.")
+    results = []
+
+    for span_id, row in df.iterrows():
+        try:
+            # Parse tool parameters
+            params = json.loads(row["tool_parameters"]) if isinstance(row["tool_parameters"], str) else row["tool_parameters"]
+            product_name = params.get("name", "") if isinstance(params, dict) else ""
+
+            if not product_name:
+                results.append({"label": "FAIL", "score": 0, "explanation": "No product name in tool parameters"})
+                continue
+
+            # Parse tool result
+            result = json.loads(row["tool_result"]) if isinstance(row["tool_result"], str) else row["tool_result"]
+
+            # Check for error response
+            if isinstance(result, dict) and "error" in result:
+                results.append({"label": "FAIL", "score": 0, "explanation": f"Product not found: {result['error']}"})
+                print(f"   [FAIL] {product_name}: not found")
+                continue
+
+            # Extract price from tool result
+            tool_price = result.get("ListPrice") if isinstance(result, dict) else None
+
+            # Get ground truth from SQLite
+            actual_price = lookup_product_price(product_name)
+
+            if tool_price is None:
+                results.append({"label": "FAIL", "score": 0, "explanation": f"No ListPrice in tool result for '{product_name}'"})
+                print(f"   [FAIL] {product_name}: no price in result")
+                continue
+
+            if actual_price is None:
+                results.append({"label": "FAIL", "score": 0, "explanation": f"'{product_name}' not found in ground truth DB"})
+                print(f"   [FAIL] {product_name}: not in DB")
+                continue
+
+            # Compare prices
+            if abs(float(tool_price) - float(actual_price)) < 0.01:
+                results.append({"label": "PASS", "score": 1, "explanation": f"Price ${tool_price} matches DB (${actual_price})"})
+                print(f"   [PASS] {product_name}: ${tool_price} ✓")
+            else:
+                results.append({"label": "FAIL", "score": 0, "explanation": f"Price mismatch: tool=${tool_price}, DB=${actual_price}"})
+                print(f"   [FAIL] {product_name}: ${tool_price} ≠ ${actual_price}")
+
+        except Exception as e:
+            results.append({"label": "FAIL", "score": 0, "explanation": f"Error: {str(e)}"})
+
+    # ────────────────────────────────────────────────────────────
+    # Step 3: Push results to Phoenix as SpanEvaluations
+    # ────────────────────────────────────────────────────────────
+    if results:
+        eval_df = pd.DataFrame(results, index=df.index)
+        push_eval_results(client, eval_df, "pricing_accuracy")
 
 
 if __name__ == "__main__":
