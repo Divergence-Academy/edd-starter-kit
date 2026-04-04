@@ -1,0 +1,9 @@
+# Eval script dependencies
+# Install: pip install -r requirements.txt
+
+arize-phoenix-otel>=0.5.0
+openinference-instrumentation>=0.1.0
+phoenix-client>=0.1.0
+openai>=1.30.0
+pandas>=2.0.0
+python-dotenv>=1.0.0
