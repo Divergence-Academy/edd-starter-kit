@@ -4,7 +4,10 @@
  * These functions wrap SQL queries into typed, callable functions.
  * The LLM tools in tools.ts call these to get real data.
  *
- * ⚠️  This file is COMPLETE — no changes needed.
+ * Schema: AdventureWorks Lite (SalesLT-style SQLite port)
+ * - Product has ProductCategoryID (no subcategory table)
+ * - ProductCategory uses ParentProductCategoryID for hierarchy
+ * - Customer has FirstName/LastName directly (no Person table)
  */
 
 import { query, queryOne } from "./db";
@@ -19,7 +22,6 @@ export interface Product {
   Size: string | null;
   ListPrice: number;
   Category: string | null;
-  Subcategory: string | null;
 }
 
 export interface Order {
@@ -42,7 +44,8 @@ export interface Customer {
   CustomerID: number;
   FirstName: string | null;
   LastName: string | null;
-  TerritoryID: number | null;
+  CompanyName: string | null;
+  EmailAddress: string | null;
 }
 
 // ─── Product Queries ──────────────────────────────────────────
@@ -52,10 +55,9 @@ export function getProductByName(name: string): Product | null {
     `SELECT
        p.ProductID, p.Name, p.ProductNumber,
        p.Color, p.Size, p.ListPrice,
-       pc.Name AS Category, ps.Name AS Subcategory
+       pc.Name AS Category
      FROM Product p
-     LEFT JOIN ProductSubcategory ps ON p.ProductSubcategoryID = ps.ProductSubcategoryID
-     LEFT JOIN ProductCategory pc ON ps.ProductCategoryID = pc.ProductCategoryID
+     LEFT JOIN ProductCategory pc ON p.ProductCategoryID = pc.ProductCategoryID
      WHERE p.Name LIKE ?`,
     [`%${name}%`]
   );
@@ -66,10 +68,9 @@ export function getProductById(id: number): Product | null {
     `SELECT
        p.ProductID, p.Name, p.ProductNumber,
        p.Color, p.Size, p.ListPrice,
-       pc.Name AS Category, ps.Name AS Subcategory
+       pc.Name AS Category
      FROM Product p
-     LEFT JOIN ProductSubcategory ps ON p.ProductSubcategoryID = ps.ProductSubcategoryID
-     LEFT JOIN ProductCategory pc ON ps.ProductCategoryID = pc.ProductCategoryID
+     LEFT JOIN ProductCategory pc ON p.ProductCategoryID = pc.ProductCategoryID
      WHERE p.ProductID = ?`,
     [id]
   );
@@ -85,17 +86,16 @@ export function searchProducts(filters: {
     SELECT
       p.ProductID, p.Name, p.ProductNumber,
       p.Color, p.Size, p.ListPrice,
-      pc.Name AS Category, ps.Name AS Subcategory
+      pc.Name AS Category
     FROM Product p
-    LEFT JOIN ProductSubcategory ps ON p.ProductSubcategoryID = ps.ProductSubcategoryID
-    LEFT JOIN ProductCategory pc ON ps.ProductCategoryID = pc.ProductCategoryID
+    LEFT JOIN ProductCategory pc ON p.ProductCategoryID = pc.ProductCategoryID
     WHERE p.ListPrice > 0`;
 
   const params: unknown[] = [];
 
   if (filters.category) {
-    sql += ` AND (pc.Name LIKE ? OR ps.Name LIKE ?)`;
-    params.push(`%${filters.category}%`, `%${filters.category}%`);
+    sql += ` AND pc.Name LIKE ?`;
+    params.push(`%${filters.category}%`);
   }
   if (filters.maxPrice !== undefined) {
     sql += ` AND p.ListPrice <= ?`;
@@ -164,13 +164,13 @@ export function getCustomerOrders(customerId: number): Order[] {
 export function getCustomerById(customerId: number): Customer | null {
   return queryOne<Customer>(
     `SELECT
-       c.CustomerID,
-       p.FirstName,
-       p.LastName,
-       c.TerritoryID
-     FROM Customer c
-     LEFT JOIN Person p ON c.PersonID = p.BusinessEntityID
-     WHERE c.CustomerID = ?`,
+       CustomerID,
+       FirstName,
+       LastName,
+       CompanyName,
+       EmailAddress
+     FROM Customer
+     WHERE CustomerID = ?`,
     [customerId]
   );
 }

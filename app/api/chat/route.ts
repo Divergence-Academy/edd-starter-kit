@@ -16,45 +16,30 @@ import {
 } from "@/lib/tracing";
 
 export async function POST(request: NextRequest) {
-  // ────────────────────────────────────────────────────────────
-  // TODO: Implement the chat API endpoint
-  //
-  // Steps:
-  //   1. Parse the request body to get { message, history }
-  //      - message: string (the user's new message)
-  //      - history: ChatMessage[] (previous messages in the conversation)
-  //
-  //   2. Start a Phoenix conversation trace:
-  //      const span = startConversationTrace({
-  //        userMessage: message,
-  //        studentName: process.env.STUDENT_NAME || "unknown",
-  //      });
-  //
-  //   3. Call the chat() function from llmClient.ts:
-  //      const response = await chat(message, history);
-  //
-  //   4. End the Phoenix trace:
-  //      endConversationTrace(span, response.message, response.toolCalls.length);
-  //
-  //   5. Return the response as JSON:
-  //      return NextResponse.json({
-  //        message: response.message,
-  //        toolCalls: response.toolCalls,
-  //      });
-  //
-  //   6. Wrap everything in try/catch. On error:
-  //      - End the span with an error status
-  //      - Return a 500 response with the error message
-  //
-  // ────────────────────────────────────────────────────────────
+  try {
+    const { message, history } = await request.json();
 
-  // REMOVE THIS PLACEHOLDER once you implement the above:
-  return NextResponse.json(
-    {
-      message:
-        "⚠️ route.ts is not yet implemented. Complete the TODO in this file.",
-      toolCalls: [],
-    },
-    { status: 501 }
-  );
+    const traceHandle = startConversationTrace({
+      userMessage: message,
+      studentName: process.env.STUDENT_NAME || "unknown",
+    });
+
+    const response = await chat(message, history || [], traceHandle);
+
+    endConversationTrace(
+      traceHandle, response.message, response.toolCalls.length
+    );
+
+    return NextResponse.json({
+      message: response.message,
+      toolCalls: response.toolCalls,
+    });
+  } catch (error: any) {
+    console.error("Chat API error:", error);
+    return NextResponse.json(
+      { message: `Error: ${error.message}`, toolCalls: [] },
+      { status: 500 }
+    );
+  }
 }
+

@@ -16,7 +16,7 @@
 
 import OpenAI from "openai";
 import { TOOL_DEFINITIONS, executeTool, type ToolResult } from "./tools";
-import { traceToolCall, traceLLMCall } from "./tracing";
+import { traceToolCall, traceLLMCall, type TraceHandle } from "./tracing";
 
 // ─── Configuration ────────────────────────────────────────────
 
@@ -63,7 +63,8 @@ export interface ChatResponse {
  */
 export async function chat(
   userMessage: string,
-  conversationHistory: ChatMessage[] = []
+  conversationHistory: ChatMessage[] = [],
+  traceHandle?: TraceHandle
 ): Promise<ChatResponse> {
   const client = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
@@ -71,50 +72,60 @@ export async function chat(
 
   const allToolCalls: ToolResult[] = [];
 
-  // Build the messages array with system prompt + history + new message
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
     ...conversationHistory,
     { role: "user", content: userMessage },
   ];
 
-  // ────────────────────────────────────────────────────────────
-  // TODO: Implement the tool-calling loop
-  //
-  // Steps:
-  //   1. Call client.chat.completions.create() with:
-  //      - model: "gpt-4o-mini"
-  //      - messages: messages (cast as needed)
-  //      - tools: TOOL_DEFINITIONS
-  //
-  //   2. Check the response:
-  //      - If the LLM returned tool_calls:
-  //          a. For each tool call, extract the function name and arguments
-  //          b. Call executeTool(name, args) to get the result
-  //          c. Call traceToolCall(name, args, result) for Phoenix tracing
-  //          d. Collect the tool result into allToolCalls
-  //          e. Add the assistant message (with tool_calls) and tool results
-  //             back into the messages array
-  //          f. Call the LLM again (loop back to step 1)
-  //
-  //      - If the LLM returned a text response (no tool_calls):
-  //          a. Call traceLLMCall(messages, responseText) for Phoenix tracing
-  //          b. Return { message: responseText, toolCalls: allToolCalls }
-  //
-  // Hint: Use a while(true) loop. Break when you get a text response.
-  //
-  // Hint: Tool call arguments come as a JSON string. Parse them:
-  //   const args = JSON.parse(toolCall.function.arguments);
-  //
-  // Hint: Tool results go back to the LLM like this:
-  //   { role: "tool", content: JSON.stringify(result), tool_call_id: toolCall.id }
-  //
-  // ────────────────────────────────────────────────────────────
+  // Tool-calling loop
+  while (true) {
+    const response = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: messages as any,
+      tools: TOOL_DEFINITIONS,
+    });
 
-  // REMOVE THIS PLACEHOLDER once you implement the above:
-  return {
-    message:
-      "⚠️ llmClient.ts is not yet implemented. Complete the TODO in this file to connect to your LLM.",
-    toolCalls: [],
-  };
+    const choice = response.choices[0];
+    const assistantMessage = choice.message;
+
+    // Check if the LLM wants to call tools
+    if (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
+      messages.push(assistantMessage as any);
+
+      for (const toolCall of assistantMessage.tool_calls) {
+        const name = toolCall.function.name;
+        const args = JSON.parse(toolCall.function.arguments);
+
+        const result = executeTool(name, args);
+        if (traceHandle) traceToolCall(traceHandle.ctx, name, args, result);
+        allToolCalls.push({ toolName: name, args, result });
+
+        messages.push({
+          role: "tool",
+          content: JSON.stringify(result),
+          tool_call_id: toolCall.id,
+        } as any);
+      }
+      continue;
+    }
+
+    // No tool calls — final text response
+    const responseText = assistantMessage.content
+      || "I'm sorry, I couldn't generate a response.";
+
+    if (traceHandle) {
+      traceLLMCall(
+        traceHandle.ctx,
+        messages.map((m) => ({
+          role: m.role,
+          content: typeof m.content === 'string' ? m.content : ''
+        })),
+        responseText,
+        "gpt-4o-mini"
+      );
+    }
+
+    return { message: responseText, toolCalls: allToolCalls };
+  }
 }
